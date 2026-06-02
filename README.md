@@ -8,18 +8,7 @@ This is the official repository for the paper: ProbMoE: Differentiable Probabili
 
 ## 📄 Overview
 
-Mixture-of-Experts (MoE) models scale by ac-
-tivating only a small subset of experts per to-
-ken. However, training such models remains
-challenging because top-krouting is discrete and
-non-differentiable, requiring gradient estimators
-for expert selection whose design remains a cen-
-tral open problem. We introduce ProbMoE, a
-probabilistic routing framework that models ex-
-pert selection as a distribution over cardinality-
-constrained expert subsets and formulates routing
-as probabilistic inference in this discrete subset
-space. To optimize this formulation, ProbMoE adopts [SIMPLE](https://openreview.net/forum?id=q3KCXh0Mug) (Ahmed et al., 2023), a gradient estimator for cardinality-constrained subset distributions.
+Mixture-of-Experts (MoE) models scale by activating only a small subset of experts per token. However, training such models remains challenging because top-krouting is discrete and non-differentiable, requiring gradient estimators for expert selection whose design remains a central open problem. We introduce ProbMoE, a probabilistic routing framework that models expert selection as a distribution over cardinality-constrained expert subsets and formulates routing as probabilistic inference in this discrete subset space. To optimize this formulation, ProbMoE adopts [SIMPLE](https://openreview.net/forum?id=q3KCXh0Mug) (Ahmed et al., 2023), a gradient estimator for cardinality-constrained subset distributions.
 
 - **ProbMoE Exact-*k*** — samples discrete *k*-expert subsets in the forward pass, with the backward pass propagating gradients through each expert's exact marginal probability as a tractable surrogate for the true gradient.
 - **ProbMoE Dynamic-*k*** — generalizes Exact-*k* so that both training and inference constrain routing cardinality to the same predefined range, allowing adaptive expert allocation per token.
@@ -28,7 +17,7 @@ Across benchmarks on **OLMoE** and **Qwen-MoE** backbones, ProbMoE Exact-*k* imp
 
 ![ProbMoE framework](fig/framework.png)
 
-> **Comparison of conventional Top-$k$ training and ProbMoE training.** **Left:** **Conventional** MoE applies a deterministic top-$k$ operator to the softmax routing probabilities for expert selection, while propagating gradients only through these probabilities. **Right:** **ProbMoE** models expert routing as probabilistic inference over discrete expert subsets. ProbMoE samples an expert subset $S$ from a cardinality-constrained distribution. Let $z$ denote the binary mask of the sampled subset and let $m$ denote the corresponding expert-selection marginals. Gradients are propagated through the straight-through mask $g=\operatorname{stopgrad}(z-m)+m$, which is combined with the softmax routing probabilities to form the final routing weights. This yields informative router gradients while preserving sparse expert execution. ProbMoE Dynamic-$k$ allows the subset size to vary within a range, with ProbMoE Exact-$k$ recovered as a special case.
+> **Comparison of conventional Top-$k$ training and ProbMoE training.** **Left:** **Conventional** MoE applies a deterministic top-$k$ operator to the softmax routing probabilities for expert selection, while propagating gradients only through these probabilities. **Right:** **ProbMoE** models expert routing as probabilistic inference over discrete expert subsets. ProbMoE samples an expert subset $S$ from a cardinality-constrained distribution. Let $z$ denote the binary mask of the sampled subset and let $m$ denote the corresponding expert-selection marginals. Gradients are propagated through the straight-through mask $g=stopgrad(z-m)+m$, which is combined with the softmax routing probabilities to form the final routing weights. This yields informative router gradients while preserving sparse expert execution. ProbMoE Dynamic-$k$ allows the subset size to vary within a range, with ProbMoE Exact-$k$ recovered as a special case.
 
 ---
 
