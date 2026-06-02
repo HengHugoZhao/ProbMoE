@@ -1,0 +1,24 @@
+#!/bin/bash
+bash finetune/script/finetune/full_simple.sh \
+    --task law \
+    --model olmoe \
+    --total_batch_size 256 \
+    --num_train_epochs 8 \
+    --num_gpus 4 \
+    --devices 4,5,6,7 \
+    --port 28000 \
+    --lr 2e-5 \
+    --lr_scheduler_type "linear" \
+    --per_device_train_batch_size 4 \
+    --per_device_eval_batch_size 4 \
+    --gradient_checkpointing False \
+    --probmoe True \
+    --custom_moe_path "/u/qgg5se/simple/ProbMoE/models" \
+    --v2 False \
+    --band_k True \
+    --do_eval True \
+    --max_k 8 \
+    --min_k 6 \
+    --seed 42 \
+    --freeze_gate False \
+    --output_suffix "LAW_ProbMoE_FT_Dynamic_K_${MAX_K}_${MIN_K}_seed42" 

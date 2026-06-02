@@ -1,0 +1,322 @@
+# Copyright 2025 the LlamaFactory team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+from typing import TYPE_CHECKING, Any, Optional, TypedDict
+
+import torch
+import sys
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForSeq2SeqLM,
+    AutoModelForTextToWaveform,
+    AutoModelForVision2Seq,
+    AutoProcessor,
+    AutoTokenizer,
+)
+from trl import AutoModelForCausalLMWithValueHead
+
+from ..extras import logging
+from ..extras.misc import count_parameters, skip_check_imports, try_download_model_from_other_hub
+from ..extras.packages import is_transformers_version_greater_than
+from .adapter import init_adapter
+from .model_utils.liger_kernel import apply_liger_kernel
+from .model_utils.misc import register_autoclass
+from .model_utils.mod import convert_pretrained_model_to_mod, load_mod_pretrained_model
+from .model_utils.unsloth import load_unsloth_pretrained_model
+from .model_utils.valuehead import load_valuehead_params
+from .patcher import patch_config, patch_model, patch_processor, patch_tokenizer, patch_valuehead_model
+
+
+
+if is_transformers_version_greater_than("4.46.0"):
+    from transformers import AutoModelForImageTextToText
+
+
+if TYPE_CHECKING:
+    from transformers import PretrainedConfig, PreTrainedModel, PreTrainedTokenizer, ProcessorMixin
+
+    from ..hparams import FinetuningArguments, ModelArguments
+
+
+logger = logging.get_logger(__name__)
+
+
+class TokenizerModule(TypedDict):
+    tokenizer: "PreTrainedTokenizer"
+    processor: Optional["ProcessorMixin"]
+
+def _get_init_kwargs(model_args: "ModelArguments") -> dict[str, Any]:
+    r"""Get arguments to load config/tokenizer/model.
+
+    Note: including inplace operation of model_args.
+    """
+    skip_check_imports()
+    model_args.model_name_or_path = try_download_model_from_other_hub(model_args)
+    return {
+        "trust_remote_code": model_args.trust_remote_code,
+        "cache_dir": model_args.cache_dir,
+        "revision": model_args.model_revision,
+        "token": model_args.hf_hub_token,
+    }
+
+def _apply_router_policy_sft(model, policy: str = "unfrozen") -> None:
+    """
+    policy ∈ {"frozen", "unfrozen", "ste"}
+      • frozen   – leave MoE router (mlp.gate) params untouched.
+      • unfrozen – set requires_grad=True so gates learn alongside LoRA.
+
+    """
+    if policy not in {"frozen"}:  # default → no-op
+        return
+
+    frozen_cnt = 0
+    # unwrap PEFT → the transformer blocks live under .model.layers
+    layers = getattr(model, "model", model).layers
+
+    for layer in layers:
+        if hasattr(layer, "mlp") and hasattr(layer.mlp, "gate"):
+            gate = layer.mlp.gate
+
+            if policy == "frozen":
+                for p in gate.parameters():
+                    if p.requires_grad:
+                        p.requires_grad = False
+                        frozen_cnt += p.numel()
+
+    if policy == "frozen":
+        logger.info_rank0(f"[LoRA] Froze {frozen_cnt:,} router-gate parameters.")
+
+
+def load_tokenizer(model_args: "ModelArguments") -> "TokenizerModule":
+    r"""Load pretrained tokenizer and optionally loads processor.
+
+    Note: including inplace operation of model_args.
+    """
+    init_kwargs = _get_init_kwargs(model_args)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.model_name_or_path,
+            use_fast=model_args.use_fast_tokenizer,
+            split_special_tokens=model_args.split_special_tokens,
+            padding_side="right",
+            **init_kwargs,
+        )
+    except ValueError:  # try the fast one
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.model_name_or_path,
+            use_fast=True,
+            padding_side="right",
+            **init_kwargs,
+        )
+    except Exception as e:
+        raise OSError("Failed to load tokenizer.") from e
+
+    patch_tokenizer(tokenizer, model_args)
+    try:
+        processor = AutoProcessor.from_pretrained(model_args.model_name_or_path, **init_kwargs)
+        patch_processor(processor, tokenizer, model_args)
+    except Exception as e:
+        logger.info_rank0(f"Failed to load processor: {e}.")
+        processor = None
+
+    # Avoid load tokenizer, see:
+    # https://github.com/huggingface/transformers/blob/v4.40.0/src/transformers/models/auto/processing_auto.py#L324
+    if processor is not None and "Processor" not in processor.__class__.__name__:
+        logger.debug("The loaded processor is not an instance of Processor. Dropping it.")
+        processor = None
+
+    return {"tokenizer": tokenizer, "processor": processor}
+
+
+def load_config(model_args: "ModelArguments") -> "PretrainedConfig":
+    r"""Load model config."""
+    init_kwargs = _get_init_kwargs(model_args)
+    return AutoConfig.from_pretrained(model_args.model_name_or_path, **init_kwargs)
+
+def init_selection_gate_from_gate_zero3(model, noise_std=1e-4):
+    """Copy gate weights to selection_gate with noise. DeepSpeed ZeRO-3 version."""
+    from deepspeed import zero
+    import deepspeed
+    done = 0
+    for name, m in model.named_modules():
+        if hasattr(m, "gate") and hasattr(m, "selection_gate"):
+            params = [m.gate.weight, m.selection_gate.weight]
+            with zero.GatheredParameters(params, modifier_rank=0):
+                if int(os.getenv("LOCAL_RANK", "0")) == 0:
+                    with torch.no_grad():
+                        base = m.gate.weight
+                        noise = torch.randn_like(base) * noise_std
+                        m.selection_gate.weight.copy_(base + noise)
+            done += 1
+    if int(os.getenv("LOCAL_RANK", "0")) == 0:
+        logger.info_rank0(f"Copied gate -> selection_gate for {done} modules (noise_std={noise_std})")
+        
+def debug_check_gate_copy_zero3(model, max_layers=10):
+    """Verify gate -> selection_gate copy worked. DeepSpeed ZeRO-3 version."""
+    from deepspeed import zero
+    checked = 0
+    for name, m in model.named_modules():
+        if hasattr(m, "gate") and hasattr(m, "selection_gate"):
+            params = [m.gate.weight, m.selection_gate.weight]
+            with zero.GatheredParameters(params, modifier_rank=0):
+                if int(os.getenv("LOCAL_RANK", "0")) == 0:
+                    g = m.gate.weight.detach().float().cpu()
+                    s = m.selection_gate.weight.detach().float().cpu()
+                    diff = (g - s).abs()
+                    logger.info_rank0(f"[{name}] diff max={diff.max().item():.6g} mean={diff.mean().item():.6g}")
+            checked += 1
+            if checked >= max_layers:
+                break
+
+def load_model(
+    tokenizer: "PreTrainedTokenizer",
+    model_args: "ModelArguments",
+    finetuning_args: "FinetuningArguments",
+    is_trainable: bool = False,
+    add_valuehead: bool = False,
+) -> "PreTrainedModel":
+    r"""Load pretrained model."""
+    init_kwargs = _get_init_kwargs(model_args)
+    config = load_config(model_args)
+    patch_config(config, tokenizer, model_args, init_kwargs, is_trainable)
+    apply_liger_kernel(config, model_args, is_trainable, require_logits=(finetuning_args.stage not in ["pt", "sft"]))
+    
+    sys.path.append(model_args.custom_moe_path)
+    if model_args.probmoe:
+        logger.info_rank0("Using ProbMoE MoE model modification for Qwen2-MoE")
+        try:    
+            import transformers.models.qwen2_moe.modeling_qwen2_moe as Qwen2_module
+            if model_args.band_k:
+                logger.info_rank0("load dynamic probmoe")
+                from Qwen.ProbMoE_V1_qwen_dynamic import ProbMoEQwen2MoeSparseMoeBlock
+            else:
+                logger.info_rank0("loading exact ProbMoE")
+                from Qwen.ProbMoE_V1_qwen_exact import ProbMoEQwen2MoeSparseMoeBlock
+            Qwen2_module.Qwen2MoeSparseMoeBlock = ProbMoEQwen2MoeSparseMoeBlock
+            logger.info_rank0("Successfully imported ProbMoEQwen2MoeSparseMoeBlock")
+        except ImportError as e:
+            logger.info_rank0(f"Failed to import ProbMoEQwen2MoeSparseMoeBlock: {e}")
+        except Exception as e:
+            logger.info_rank0(f"Error importing ProbMoEQwen2MoeSparseMoeBlock: {e}")
+    else:
+        logger.info_rank0("Using standard MoE model for Qwen2-MoE")
+
+    model = None
+    lazy_load = False
+    if model_args.use_unsloth:
+        if model_args.adapter_name_or_path is not None:
+            lazy_load = True
+        elif is_trainable:
+            model = load_unsloth_pretrained_model(config, model_args)
+
+    if model is None and not lazy_load:
+        init_kwargs["config"] = config
+        init_kwargs["pretrained_model_name_or_path"] = model_args.model_name_or_path
+
+        if model_args.mixture_of_depths == "load":
+            model = load_mod_pretrained_model(**init_kwargs)
+        else:
+            if type(config) in AutoModelForVision2Seq._model_mapping.keys():  # image-text
+                load_class = AutoModelForVision2Seq
+            elif (
+                is_transformers_version_greater_than("4.46.0")
+                and type(config) in AutoModelForImageTextToText._model_mapping.keys()
+            ):  # image-text
+                load_class = AutoModelForImageTextToText
+            elif type(config) in AutoModelForSeq2SeqLM._model_mapping.keys():  # audio-text
+                load_class = AutoModelForSeq2SeqLM
+            elif type(config) in AutoModelForTextToWaveform._model_mapping.keys():  # audio hack for qwen2_5_omni
+                load_class = AutoModelForTextToWaveform
+            else:
+                load_class = AutoModelForCausalLM
+
+            if model_args.train_from_scratch:
+                model = load_class.from_config(config, trust_remote_code=model_args.trust_remote_code)
+            else:
+                model = load_class.from_pretrained(**init_kwargs)
+                if getattr(model.config, "model_type", None) == "qwen2_5_omni":
+                    model = model.thinker  # use part of Omni model
+
+        if model_args.mixture_of_depths == "convert":
+            model = convert_pretrained_model_to_mod(model, config, model_args)
+
+    if not lazy_load:
+        patch_model(model, tokenizer, model_args, is_trainable, add_valuehead)
+        register_autoclass(config, model, tokenizer)
+
+    model = init_adapter(config, model, model_args, finetuning_args, is_trainable)
+
+    if add_valuehead:
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
+        patch_valuehead_model(model)
+
+        if model_args.adapter_name_or_path is not None:
+            vhead_path = model_args.adapter_name_or_path[-1]
+        else:
+            vhead_path = model_args.model_name_or_path
+
+        vhead_params = load_valuehead_params(vhead_path, model_args)
+        if vhead_params is not None:
+            model.load_state_dict(vhead_params, strict=False)
+            logger.info_rank0(f"Loaded valuehead from checkpoint: {vhead_path}")
+
+    if not is_trainable:
+        model.requires_grad_(False)
+        for param in model.parameters():
+            if param.data.dtype == torch.float32 and model_args.compute_dtype != torch.float32:
+                param.data = param.data.to(model_args.compute_dtype)
+
+        model.eval()
+    else:
+        model.train()
+
+        _apply_router_policy_sft(model, getattr(model_args, "sft_router", "unfrozen"))
+
+        if model_args.sft_router == "frozen":
+            print("Check whether router is frozen")
+            for name, param in model.named_parameters():
+                if "gate" in name and "gate_proj" not in name and not param.requires_grad:
+                    print(name, "is frozen")
+
+    trainable_params, all_param = count_parameters(model)
+    if is_trainable:
+        param_stats = (
+            f"trainable params: {trainable_params:,} || "
+            f"all params: {all_param:,} || trainable%: {100 * trainable_params / all_param:.4f}"
+        )
+    else:
+        param_stats = f"all params: {all_param:,}"
+
+    logger.info_rank0(param_stats)
+
+    if model_args.print_param_status and int(os.getenv("LOCAL_RANK", "0")) == 0:
+        for name, param in model.named_parameters():
+            print(f"name: {name}, dtype: {param.dtype}, device: {param.device}, trainable: {param.requires_grad}")
+    if model_args.probmoe:
+        for name, module in model.named_modules():
+            if isinstance(module, Qwen2_module.Qwen2MoeSparseMoeBlock) or isinstance(module, Qwen2_module.ProbMoEQwen2MoeSparseMoeBlock):
+                logger.info_rank0(f"Found Qwen2MoeSparseMoeBlock module: {name} ({type(module)})")
+                if hasattr(module, 'compute_marginals'):
+                    logger.info_rank0(f"Module {name} has method compute_marginals, using ProbMoE forward")
+                    break
+                elif hasattr(module, 'compute_marginals_band'):
+                    logger.info_rank0(f"Module {name} has method compute_marginals_band, using ProbMoE forward with band_k={model_args.band_k}")
+                    break
+    else:
+        logger.info_rank0("Not checking for custom forward method since densemixer_moe is not enabled.") 
+            
+        
+    return model

@@ -1,0 +1,4 @@
+#ignore pychache
+__pycache__/
+#ignore log files
+*.log
