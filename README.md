@@ -137,14 +137,14 @@ Found MoE block: model.layers.0.mlp - Type: <class 'OLMoE.v1.ProbMoE_V1_olmoe_dy
 If you use ProbMoE in your research, please cite our paper:
 
 ```bibtex
-@inproceedings{zhao2026probmoe,
-  title     = {{ProbMoE}: Differentiable Probabilistic Routing for Mixture-of-Experts},
-  author    = {Zhao, Heng and Shao, Zilei and Van den Broeck, Guy and Zeng, Zhe},
-  booktitle = {Proceedings of the 43rd International Conference on Machine Learning (ICML)},
-  year      = {2026},
-  address   = {Seoul, South Korea},
-  publisher = {PMLR},
-  volume    = {306}
+@misc{zhao2026probmoedifferentiableprobabilisticrouting,
+      title={ProbMoE: Differentiable Probabilistic Routing for Mixture-of-Experts}, 
+      author={Heng Zhao and Zilei Shao and Guy Van den Broeck and Zhe Zeng},
+      year={2026},
+      eprint={2606.01509},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2606.01509}, 
 }
 ```
 
