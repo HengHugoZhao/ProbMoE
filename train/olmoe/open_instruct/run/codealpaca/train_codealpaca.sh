@@ -13,7 +13,6 @@ bash finetune/script/finetune/full_simple.sh \
     --per_device_eval_batch_size 4 \
     --gradient_checkpointing False \
     --probmoe True \
-    --custom_moe_path "/u/qgg5se/simple/ProbMoE/models" \
     --v2 False \
     --band_k False \
     --dm False \
@@ -22,4 +21,4 @@ bash finetune/script/finetune/full_simple.sh \
     --min_k 6 \
     --seed 42 \
     --freeze_gate False \
-    --output_suffix "CodeAlpaca_ProbMoE_Exact_FT_seed42" 
+    --output_suffix "CodeAlpaca_ProbMoE_Exact_FT_seed42"

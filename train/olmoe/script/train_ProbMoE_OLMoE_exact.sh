@@ -1,9 +1,17 @@
-DATASET="gsm" #enter the dataset name here, e.g. gsm, law, etc.
+#!/usr/bin/env bash
+set -euo pipefail
 
-export WANDB_API_KEY=""
+DATASET="${1:-${DATASET:-gsm}}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+OPEN_INSTRUCT_DIR="${SCRIPT_DIR}/../open_instruct"
+LAUNCHER="run/${DATASET}/train_${DATASET}.sh"
+LOG_DIR="${SCRIPT_DIR}/log/exact/${DATASET}"
 
-cd /ProbMoE/train/olmoe/open_instruct #enter the path to the open_instruct directory here
+if [[ ! -f "${OPEN_INSTRUCT_DIR}/${LAUNCHER}" ]]; then
+    echo "Unsupported dataset or missing launcher: ${OPEN_INSTRUCT_DIR}/${LAUNCHER}" >&2
+    exit 1
+fi
 
-mkdir -p log/exact/${DATASET}
-
-bash run/${DATASET}/train_${DATASET}.sh 2>&1 | tee /ProbMoE/train/olmoe/script/log/exact/${DATASET}/train_${DATASET}_ProbMoE_exact.log
+mkdir -p "${LOG_DIR}"
+cd "${OPEN_INSTRUCT_DIR}"
+bash "${LAUNCHER}" 2>&1 | tee "${LOG_DIR}/train_${DATASET}_ProbMoE_exact.log"

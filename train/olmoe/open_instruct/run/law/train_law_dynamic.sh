@@ -1,4 +1,7 @@
 #!/bin/bash
+MAX_K=8
+MIN_K=6
+
 bash finetune/script/finetune/full_simple.sh \
     --task law \
     --model olmoe \
@@ -13,12 +16,11 @@ bash finetune/script/finetune/full_simple.sh \
     --per_device_eval_batch_size 4 \
     --gradient_checkpointing False \
     --probmoe True \
-    --custom_moe_path "/u/qgg5se/simple/ProbMoE/models" \
     --v2 False \
     --band_k True \
     --do_eval True \
-    --max_k 8 \
-    --min_k 6 \
+    --max_k "$MAX_K" \
+    --min_k "$MIN_K" \
     --seed 42 \
     --freeze_gate False \
-    --output_suffix "LAW_ProbMoE_FT_Dynamic_K_${MAX_K}_${MIN_K}_seed42" 
+    --output_suffix "LAW_ProbMoE_FT_Dynamic_K_${MAX_K}_${MIN_K}_seed42"

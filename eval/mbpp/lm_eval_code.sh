@@ -1,11 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-export HF_HOME=/p/simple/hf_cache
-export HF_HUB_CACHE=/p/simple/hf_cache
-export TRANSFORMERS_CACHE=/p/simple/hf_cache
-export TRITON_CACHE_DIR=/p/simple/triton_cache
-
-BASE_DIR=""
+: "${BASE_DIR:?Set BASE_DIR to the directory containing the checkpoints.}"
 
 model_list=()
 for epoch in {0..3}; do
@@ -43,5 +39,4 @@ for model_nm in "${model_list[@]}"; do
             --confirm_run_unsafe_code 2>&1 | tee -a "$task_log"
     done
 done
-
 

@@ -5,7 +5,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from datasets import load_dataset
-from benchmarks import *
+from .benchmarks import *
 import multiprocessing as mp
 
 def load_model(base_model_path, cache_dir):

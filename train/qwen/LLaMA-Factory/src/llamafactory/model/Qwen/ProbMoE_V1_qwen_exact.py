@@ -33,22 +33,21 @@ class ProbMoEQwen2MoeSparseMoeBlock(OriginalQwen2MoeSparseMoeBlock):
     def __init__(self, config):
         super().__init__(config)
         self.use_gradient_clipping = getattr(config, 'use_gradient_clipping', False)
-        
-        self.k_max = getattr(config, 'k_max', self.top_k)
-        self.k_min = getattr(config, 'k_min', 2)
     
-    def log_pr_upto_k(self, log_p, log_q, k_max):
+    def log_pr_exactly_k(self, log_p, log_q, k):
         """
-        compute the log probability of less or equal to k experts being selected using dp
+        compute the log probability of excatly k experts being selected using dp
         """
 
         batch_size, n_experts = log_p.shape
         log_p = log_p.float()
+
         # NEG_INF = -80 #float('-inf')
         NEG_INF = -300.0
-        
+
+
         # Initialize the DP table
-        state = torch.full((batch_size, k_max + 2), NEG_INF, device=log_p.device, dtype=log_p.dtype)
+        state = torch.full((batch_size, k + 2), NEG_INF, device=log_p.device, dtype=log_p.dtype)
         state[:, 1] = 0.0  # P (sum = 0 from 0 experts) = 1
 
         all_states = [state.clone()]
@@ -66,83 +65,97 @@ class ProbMoEQwen2MoeSparseMoeBlock(OriginalQwen2MoeSparseMoeBlock):
             state = new_state
             all_states.append(state.clone())
         return torch.stack(all_states, dim=1)  # (batch_size, n_experts + 1, k + 2)
-
-    def sample_band_K(self, router_logits, a, k_min, k_max):
-        #compute the probability of selecting between k_min and k_max experts
-        B = a.size(0)
-        
-        logps = a[:, -1, (k_min + 1):(k_max + 2)]  # (batch_size, k_max - k_min + 1)
-        probs = torch.softmax(logps, dim=-1)  # (batch_size, k_max - k_min + 1) P(S = k_min + idx | k_min ≤ S ≤ k_max)
-        idx = torch.multinomial(probs, num_samples=1).squeeze(1) # [0, band_len-1]
-        ks = idx + k_min  # sampled k values
-        return ks
     
-    def compute_marginals_band(self, router_logits, k_min, k_max):
+    # def compute_marginals(self, router_logits, k):
+    #     # print("Computing marginals with k =", k)
+    #     # Clamp router logits to prevent extreme values
+    #     router_logits_f32 = router_logits.float()
+
+    #     log_p = log_sigmoid(router_logits_f32)
+    #     log_p.requires_grad_(True)
+    #     log_q = log1mexp(log_p.detach())
+    #     a = self.log_pr_exactly_k(log_p, log_q, k)
+    #     log_pr = a[:, -1, k + 1 : k+2]
+    #     marginals = torch.autograd.grad(
+    #         outputs=log_pr.sum(),
+    #         inputs=log_p,
+    #         create_graph=True,
+    #     )[0]
+    #     return marginals, a
+    
+    def compute_marginals(self, router_logits, k):
         # print("Computing marginals with k =", k)
         # Clamp router logits to prevent extreme values
-        router_logits = router_logits.float()
-        # router_logits_f32 = torch.clamp(router_logits_f32, min=-50.0, max=500.0)# do
-        
-        log_p = log_sigmoid(router_logits)
-        log_p.requires_grad_(True)
-        # log_q = torch_log1mexp_tfstyle(log_p)
-        log_q = log1mexp(log_p.detach())  # stop gradient through log_q
-        # log_p = log_p.detach().requires_grad_(True)
-        a = self.log_pr_upto_k(log_p, log_q, k_max)
-        band_logps = a[:, -1, (k_min + 1):(k_max + 2)]  # (batch_size, k_max - k_min + 1)
-        Log_P_band = torch.logsumexp(band_logps, dim=-1).sum()  # (batch_size, )
-        marginals = torch.autograd.grad(
-            outputs=Log_P_band,
-            # outputs=log_pr,
-            inputs=log_p,
-            # grad_outputs=torch.ones_like(log_pr),
-            create_graph=True,
-        )[0]
-        
+        router_logits_f32 = router_logits.float()
+        if not router_logits_f32.requires_grad:
+            router_logits_f32.requires_grad_(True)
+
+        with torch.enable_grad():
+            log_p = log_sigmoid(router_logits_f32)
+            log_q = log1mexp(log_p.detach())
+            a = self.log_pr_exactly_k(log_p, log_q, k)
+            log_pr = a[:, -1, k + 1 : k+2]
+            marginals = torch.autograd.grad(
+                outputs=log_pr.sum(),
+                inputs=log_p,
+                create_graph=True,
+            )[0]
         return marginals, a
     
-    def sample_k_subset_dynamic(self, a, log_p, ks):
-        batch_size, n_experts = log_p.shape
-        log_p = log_p.float()
-        j = ks.clone().to(device=a.device) # ks is of shape (batch_size,)
-        samples = []
-       
-        for i in range(n_experts, 0, -1):
+    def sample_k_subset(self, a, log_p, k):
+       batch_size, n_experts = log_p.shape
+       log_p = log_p.float()
+       j = torch.full((batch_size,), k, device=a.device, dtype=torch.long) #if k =2, j will be [2,2,2,...]
+       samples = []
+    
+       for i in range(n_experts, 0, -1):
            batch_idx = torch.arange(batch_size, device=a.device)
+           
+           # Handle batch dimension properly
            mask_j_zero = (j == 0)
            
-           p_vals = a[batch_idx, i-1, j]
-           z_vals = a[batch_idx, i, j+1]
-           p = (p_vals + log_p[:, i-1]) - z_vals
-           p = torch.where(mask_j_zero, torch.tensor(-300.0, device=p.device), p)
+           if mask_j_zero.all():
+               # All batches need 0 more experts
+               selection = torch.zeros(batch_size, device=a.device)
+           else:
+               # Get DP values
+               p_vals = a[batch_idx, i - 1, j]
+               z_vals = a[batch_idx, i, j + 1]
+               
+               p = (p_vals + log_p[:, i-1]) - z_vals
+               
+               # Force probability to 0 for batches that need no more experts
+               p = torch.where(mask_j_zero, torch.tensor(-300.0, device=p.device), p)
+               
+               q = log1mexp(p)
+               log_odds = p - q
+               prob_select = torch.sigmoid(log_odds)
+               selection = torch.bernoulli(prob_select)
+               
+               # Ensure no selection when j=0
+            #    mask_j_zero = (j == 0)
+               selection = torch.where(mask_j_zero, torch.zeros_like(selection), selection)
            
-           q = log1mexp(p)
-           log_odds = p - q
-           prob_select = torch.sigmoid(log_odds)
-           selection = torch.bernoulli(prob_select)
-           selection = torch.where(mask_j_zero, torch.zeros_like(selection), selection)
-           
+           # Update remaining count
            j = torch.where(selection > 0, j - 1, j)
+           if (j < 0).any():
+                print(f"j went negative: {j}, iteration i={i}")
            samples.append(selection)
-           
-        samples = torch.stack(samples[::-1], dim=1)  # (batch_size, n_experts)
-        return samples
+       
+       samples = torch.stack(samples[::-1], dim=1)
+       return samples
    
-    def simoe_routing(self, router_logits):
+    def probmoe_routing(self, router_logits):
         """
-        simoe-based stochastic routing for trainig
+        ProbMoE stochastic routing for training.
         """
-        # print("Using simoe routing")
         router_logits = router_logits.float()
         log_p = log_sigmoid(router_logits)
         log_q = log1mexp(log_p.detach())  # stop gradient through log_q
-        a = self.log_pr_upto_k(log_p, log_q, self.k_max)
-        
-        ks = self.sample_band_K(router_logits, a, self.k_min, self.k_max)
-        # print("Sampled ks:", ks)
-        samples = self.sample_k_subset_dynamic(a, log_p, ks).detach()
+        a = self.log_pr_exactly_k(log_p, log_q, self.top_k)
+        samples = self.sample_k_subset(a, log_p, self.top_k).detach()
         #compute the exact marginals and discrete samples
-        marginals, _ = self.compute_marginals_band(router_logits, self.k_min, self.k_max)
+        marginals, _ = self.compute_marginals(router_logits, self.top_k)
         
         #during training, use the softmax for the router weights
         softmax_probs = F.softmax(router_logits, dim=1, dtype=torch.float)  # (batch_size*sequence_length, num_experts)
@@ -152,17 +165,15 @@ class ProbMoEQwen2MoeSparseMoeBlock(OriginalQwen2MoeSparseMoeBlock):
             regularized_marginals = 0.99 * marginals + 0.01 * sigmoid_probs
             regularized_marginals = torch.clamp(regularized_marginals, min=1e-3, max=1-1e-3)
             marginals = regularized_marginals
-            
+        
         g_full = (samples - marginals).detach() + marginals  # Straight-through estimator
-        w_full = g_full * softmax_probs  # (batch_size, n_experts)
-        values, selected_experts = torch.topk(samples, self.k_max, dim=-1)
+        
+        w_full = g_full * softmax_probs  # (batch_size*sequence_length, num_experts)
+        
+        _, selected_experts = torch.topk(samples, self.top_k, dim=-1)
         
         router_weights = torch.gather(w_full, 1, selected_experts)
         
-        router_weights = router_weights * values  # zero out unselected experts
-        
-    
-        #cast back to the input dtype
         router_weights = router_weights.to(router_logits.dtype)
         return router_weights, selected_experts
    
@@ -170,51 +181,13 @@ class ProbMoEQwen2MoeSparseMoeBlock(OriginalQwen2MoeSparseMoeBlock):
         """
         Deterministic top-k routing for inference
         """
-        #deterministic top-k routing
-        router_logits = router_logits.float() #[B,E]
-        B, E = router_logits.shape
-        
-        #sort the logits by router logits decending
-        sorted_logits, sorted_indices = torch.sort(router_logits, dim=1, descending=True)
-        
-        #Prefix sums of sorted logits
-        cumsums = torch.cumsum(sorted_logits, dim=1)  #[B,E] calculates the sum of elements up to the current position along the specified dim
-        
-        #choose k in the range, map 
-        #slice the range and take find the argmax per row
-        candidate_scores = cumsums[:, (self.k_min - 1):self.k_max] #[B, k_max - k_min + 1]
-        best_k_offset = torch.argmax(candidate_scores, dim=1)  #[B,]
-        best_ks = best_k_offset + self.k_min  #[B,]
-        
-        #always take the  k_max for padding 
-        topk_idx = sorted_indices[:, :self.k_max]  #(B, k_max)
-        
-        #softmax
-        soft_routing = torch.softmax(router_logits, dim=1, dtype=torch.float)  # (batch_size*sequence_length, num_experts)
-        batch_idx = torch.arange(B, device=router_logits.device).unsqueeze(1)
-        routing_weights = soft_routing[batch_idx, topk_idx]  #(B, k_max)
-        
-        #mask out the unselected experts based on best_ks
-        pos = torch.arange(self.k_max, device=router_logits.device).unsqueeze(0)  #(1, k_max)
-        keep_mask = (pos < best_ks.unsqueeze(1)).float()  #[B, kmax], True for selected positions
-        
-        #zero out the unselected experts
-        routing_weights = routing_weights * keep_mask.to(router_logits.dtype)
-
+        # print("Using deterministic routing")
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         if self.norm_topk_prob:
-            sums = routing_weights.sum(dim=1, keepdim=True)  # [B, 1]
-            # Avoid divide-by-zero if k_star == 0 (not expected with k_min>=1)
-            routing_weights = torch.where(
-                sums > 0,
-                routing_weights / sums,
-                routing_weights
-            )
-            
-        #cast back to the input dtype
-        routing_weights = routing_weights.to(router_logits.dtype)
-        selected_experts = topk_idx  # [B, kmax] (first k* real, rest padded/zero-weighted)
-        # print("Deterministic ks:", selected_experts)
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         return routing_weights, selected_experts
+
 
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -226,7 +199,7 @@ class ProbMoEQwen2MoeSparseMoeBlock(OriginalQwen2MoeSparseMoeBlock):
         
         if self.training:
             # stochastic
-            routing_weights, selected_experts = self.simoe_routing(router_logits)
+            routing_weights, selected_experts = self.probmoe_routing(router_logits)
         else:
             # determinstic     
             routing_weights, selected_experts = self.deterministic_routing(router_logits)

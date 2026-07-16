@@ -3,7 +3,6 @@ model_name_or_path: Qwen/Qwen1.5-MoE-A2.7B
 trust_remote_code: true
 probmoe: true
 band_k: false
-custom_moe_path:             #path to the directory containing the custom MoE implementation 
 
 ### method
 stage: sft
@@ -28,7 +27,7 @@ plot_loss: true
 overwrite_output_dir: true
 save_only_model: true
 report_to: wandb  # choices: [none, wandb, tensorboard, swanlab, mlflow]
-run_name: "qwen1.5_esft_translation_lr5e-6_dynamic"
+run_name: "qwen1.5_esft_translation_lr5e-6_full"
 
 ### train
 per_device_train_batch_size: 16

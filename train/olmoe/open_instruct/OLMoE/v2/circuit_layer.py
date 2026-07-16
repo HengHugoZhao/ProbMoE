@@ -72,7 +72,7 @@ class _CircuitLogZ(torch.autograd.Function):
     First-order only: backward is decorated with ``@once_differentiable`` so
     autograd will not try to differentiate the in-place downward kernel.
     Use the autograd-traced ``CircuitLayer.log_pr`` (functional `_log_Z` +
-    ``autograd.grad``) when double-backward is required (SIMOE training).
+    ``autograd.grad``) when double-backward is required (ProbMoE training).
     """
 
     @staticmethod
@@ -337,7 +337,7 @@ class CircuitLayer:
 
         WARNING: only first-order gradients. Sufficient for inference and
         for losses that don't backprop through the marginals' values
-        (e.g. `log_Z`-only losses). For SIMOE training — where the loss
+        (e.g. `log_Z`-only losses). For ProbMoE training — where the loss
         depends on `(samples - marginals).detach() + marginals` and so
         must backprop into the marginals — use `log_pr` instead, since
         that path supports the required double-backward.

@@ -1,6 +1,6 @@
 # ProbMoE Finetuning for Qwen1.5-MoE
 
-This folder contains the finetuning pipeline for **ProbMoE** (Sparse-Interpolated Mixture of Experts) on top of the **Qwen1.5-MoE-A2.7B** base model. It is built on top of [LLaMA-Factory](LLaMA-Factory/) and supports multiple downstream tasks (GSM, Law, Summary, Translation, CodeAlpaca) with both fixed-`k` (*exact*) and dynamic-`k` (*band-k*) expert routing.
+This folder contains the **ProbMoE** finetuning pipeline for the **Qwen1.5-MoE-A2.7B** base model. It is built on [LLaMA-Factory](LLaMA-Factory/) and provides fixed-`k` (*exact*) runs for GSM, Law, Summary, Translation, and CodeAlpaca, plus dynamic-`k` (*band-k*) runs for GSM, Law, and Translation.
 
 ---
 
@@ -17,6 +17,7 @@ train/qwen/
 │   │   ├── qwen1.5_esft_translation_lr5e-6.yaml
 │   │   ├── qwen1.5_codealpaca_lr5e-6.yaml
 │   │   └── ...
+│   ├── src/llamafactory/model/Qwen/                 # Framework-local ProbMoE blocks
 │   └── run/qwen1.5/probmoe_full/                    # Per-task launch scripts
 │       ├── train_gsm.sh / train_gsm_dynamic.sh
 │       ├── train_law.sh / train_law_dynamic.sh
@@ -24,8 +25,8 @@ train/qwen/
 │       ├── train_translation.sh / train_translation_dynamic.sh
 │       └── train_code.sh
 └── scripts/
-    ├── train_ProbMoE_exact_qwen.sh                   # Fixed-k entry point
-    └── train_ProbMoE_exact_qwen _dynamic.sh          # Dynamic-k entry point
+    ├── train_ProbMoE_qwen_exact.sh   # Fixed-k entry point
+    └── train_ProbMoE_qwen_dynamic.sh # Dynamic-k entry point
 ```
 
 ---
@@ -71,19 +72,13 @@ Training is driven by two layers:
 | `model_name_or_path` | Base model — defaults to `Qwen/Qwen1.5-MoE-A2.7B` |
 | `probmoe` | Enable ProbMoE routing (`true`) |
 | `band_k` | `true` for dynamic-k, `false` for fixed-k |
-| `custom_moe_path` | **Absolute** path to `ProbMoE/models` (e.g. `/u/qgg5se/ProbMoE/models`) — ⚠️ **empty by default, must be filled** |
+| `min_k` / `max_k` | Dynamic-k bounds (used when `band_k: true`) |
 | `dataset` | LLaMA-Factory dataset key (e.g. `gsm_lf`) |
 | `output_dir` / `run_name` | Checkpoint dir and W&B run name |
 | `learning_rate` / `num_train_epochs` / `per_device_train_batch_size` | Standard training hyperparameters |
 | `deepspeed` | DeepSpeed config — defaults to `ds_z3_config.json` |
 
-> ⚠️ **`custom_moe_path` must be set before training.** Every YAML under [LLaMA-Factory/examples/train_full/qwen1.5moe/full/](LLaMA-Factory/examples/train_full/qwen1.5moe/full/) ships with this field blank:
->
-> ```yaml
-> custom_moe_path:             # path to the directory containing the custom MoE implementation
-> ```
->
-> If it is left empty, the ProbMoE block is **not** patched into the model and training silently falls back to the stock `Qwen2MoeSparseMoeBlock`. Fill it with the **absolute** path to `ProbMoE/models` (e.g. `/u/qgg5se/ProbMoE/models`) and confirm patching via the [log line below](#verifying-the-probmoe-patch).
+The ProbMoE blocks live in [LLaMA-Factory/src/llamafactory/model/Qwen/](LLaMA-Factory/src/llamafactory/model/Qwen/) and are imported through the `llamafactory.model` package. No source-path field is required, and import or patch failures stop the run.
 
 **(b) In the launcher shell script** (e.g. [train_gsm.sh](LLaMA-Factory/run/qwen1.5/probmoe_full/train_gsm.sh)):
 
@@ -100,31 +95,18 @@ The top-level launchers under [scripts/](scripts/) wrap the per-task scripts and
 
 ```bash
 cd train/qwen/scripts
-
-# Edit:
-#   - DATASET (gsm | law | summary | translation | code)
-#   - WANDB_API_KEY
-#   - the cd path to your local ProbMoE/train/qwen/LLaMA-Factory
-bash train_ProbMoE_qwen_exact.sh
+export WANDB_API_KEY=...  # optional when W&B is disabled
+bash train_ProbMoE_qwen_exact.sh gsm
 ```
 
 ### Dynamic-k
 
 ```bash
 cd train/qwen/scripts
-# Edit:
-#   - DATASET (gsm | law | summary | translation | code)
-#   - WANDB_API_KEY
-#   - the cd path to your local ProbMoE/train/qwen/LLaMA-Factory
-bash "train_ProbMoE_qwen_dynamic.sh"
+bash train_ProbMoE_qwen_dynamic.sh gsm
 ```
 
-Both scripts read a single `DATASET` variable at the top, e.g.:
-
-```bash
-DATASET="gsm"            # one of: gsm, law, summary, translation, code
-export WANDB_API_KEY=""  # paste your W&B key here
-```
+Pass the dataset as the first argument, or set `DATASET` in the environment. Dynamic-k launchers are currently provided for GSM, Law, and Translation.
 
 Logs are written to `LLaMA-Factory/logs/train_full_<config>.log`.
 
@@ -133,9 +115,9 @@ Logs are written to `LLaMA-Factory/logs/train_full_<config>.log`.
 If ProbMoE was patched into the model successfully, you should see a log line of the form:
 
 ```
-[INFO|2026-05-10 17:12:00] llamafactory.model.loader:143 >> Found Qwen2MoeSparseMoeBlock module: model.layers.0.mlp (<class 'Qwen.ProbMoE_V1_qwen_exact.ProbMoEQwen2MoeSparseMoeBlock'>)
+[INFO] Found ProbMoE block: model.layers.0.mlp (<class 'llamafactory.model.Qwen.ProbMoE_V1_qwen_exact.ProbMoEQwen2MoeSparseMoeBlock'>)
 ```
- If you don't see this, the ProbMoE module was not applied — check that `probmoe: true` is set in the YAML and that `custom_moe_path` resolves to a valid `ProbMoE/models` directory.
+If you don't see this, check that `probmoe: true` is set in the YAML. A missing or mismatched ProbMoE block now raises an error during model loading.
 
 ---
 
@@ -160,10 +142,9 @@ Evaluation lives in a separate folder. See [eval/README.md](../../eval/README.md
 ## Troubleshooting
 
 - **`transformers` / `deepspeed` import errors:** make sure you are on the pinned versions (`transformers==4.51.3`, `deepspeed==0.16.7`).
-- **`custom_moe_path` errors:** the field must be an **absolute** path to the top-level `ProbMoE/models` directory in the YAML config.
 - **OOM:** lower `per_device_train_batch_size`, switch to `ds_z3_config.json` (already the default), or reduce `cutoff_len`.
-- **W&B not logging:** confirm `WANDB_API_KEY` is exported in `scripts/train_ProbMoE_exact_qwen.sh` before the launcher invokes `llamafactory-cli`.
-- **Cache permission errors:** ensure `HF_HOME`, `HF_HUB_CACHE`, `TRANSFORMERS_CACHE`, and `TRITON_CACHE_DIR` are set to writable paths in the top-level launcher.
+- **W&B not logging:** confirm `WANDB_API_KEY` is exported before running `scripts/train_ProbMoE_qwen_exact.sh` or `scripts/train_ProbMoE_qwen_dynamic.sh`.
+- **Cache permission errors:** set the Hugging Face and Triton cache environment variables to writable directories before launching.
 
 ---
 

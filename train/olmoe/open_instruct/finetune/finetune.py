@@ -72,7 +72,6 @@ from utils import (
 )
 
 from accelerate import FullyShardedDataParallelPlugin
-import sys
 
 
 from esft import to_esft
@@ -270,10 +269,6 @@ class FlatArguments:
     probmoe: bool = field(
         default=False,
         metadata={"help": "Whether to use ProbMoE custom block for finetuning."},
-    )
-    custom_moe_path: str = field(
-        default="/ProbMoE/models",
-        metadata={"help": "The path to the custom MoE block to use for finetuning."},
     )
     v2: bool = field(
         default=False,
@@ -581,25 +576,21 @@ def main(args: FlatArguments):
         raise ValueError(
             "You are instantiating a new config instance from scratch. This is not supported by this script."
         )
-    
-    custom_block_path = args.custom_moe_path if args.custom_moe_path is not None else print("No custom MoE block path provided, using default OlmoeSparseMoeBlock.")
-
     if args.model_name_or_path:
         if args.probmoe:
             logger.info("Using ProbMoEOlmoeSparseMoeBlock as the MoE layer.")
-            sys.path.append(custom_block_path)
-            logger.info(f"Added {custom_block_path} to sys.path for custom MoE block import.")
             if args.band_k:
-                logger.info("using the probmoe dynamic")
+                logger.info("Using the dynamic-k ProbMoE block.")
                 from OLMoE.v1.ProbMoE_V1_olmoe_dynamic import ProbMoEOlmoeSparseMoeBlock
+
                 config.k_max = args.max_k
                 config.k_min = args.min_k
             else:
                 if args.v2:
-                    logger.info("using the exact k ProbMoE version 2")
+                    logger.info("Using the exact-k ProbMoE version 2 block.")
                     from OLMoE.v2.ProbMoE_V2_olmoe_exact import ProbMoEOlmoeSparseMoeBlock
                 else:
-                    logger.info("using the exact k ProbMoE version 1")
+                    logger.info("Using the exact-k ProbMoE version 1 block.")
                     from OLMoE.v1.ProbMoE_V1_olmoe_exact import ProbMoEOlmoeSparseMoeBlock
                 
             olmoe_module.OlmoeSparseMoeBlock = ProbMoEOlmoeSparseMoeBlock
@@ -615,17 +606,23 @@ def main(args: FlatArguments):
                 cache_dir=args.cache_dir,
             )
             
-            for name, module in model.named_modules():
-                if "CircuitOlmoeSparseMoeBlock" in str(type(module)) or "ProbMoEOlmoeSparseMoeBlock" in str(type(module)):
-                    logger.info(f"Found MoE block: {name} - Type: {type(module)}")
-                    if args.band_k:
-                        logger.info(f"MoE block k_min: {module.k_min}, k_max: {module.k_max}")
-                    # Check if it has simple_routing method
-                    if hasattr(module, 'simple_routing'):
-                        logger.info("OK: SIMPLE model has simple_routing method")
-                    else:
-                        logger.error("ERROR: SIMPLE model missing simple_routing method!")
-                    break
+            probmoe_blocks = [
+                (name, module)
+                for name, module in model.named_modules()
+                if isinstance(module, ProbMoEOlmoeSparseMoeBlock)
+            ]
+            if not probmoe_blocks:
+                raise RuntimeError(
+                    "ProbMoE was enabled, but no ProbMoEOlmoeSparseMoeBlock was found in the loaded model."
+                )
+
+            name, module = probmoe_blocks[0]
+            if not hasattr(module, "probmoe_routing"):
+                raise RuntimeError(f"ProbMoE block {name} is missing probmoe_routing().")
+
+            logger.info(f"Found ProbMoE block: {name} - Type: {type(module)}")
+            if args.band_k:
+                logger.info(f"MoE block k_min: {module.k_min}, k_max: {module.k_max}")
         else:
             logger.info("Using standard OlmoeSparseMoeBlock as the MoE layer.")
             model = AutoModelForCausalLM.from_pretrained(

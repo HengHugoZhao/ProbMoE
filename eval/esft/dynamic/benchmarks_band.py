@@ -1,5 +1,3 @@
-import sys
-from xml.parsers.expat import model
 import torch
 import json
 import time
@@ -7,27 +5,10 @@ import re
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-try:
-    print("🔄 Applying MoE patch for OLMoE (Hugging Face Backend)...")
-    
-    # Import the Transformers OLMoE module
-    import transformers.models.olmoe.modeling_olmoe as olmoe_module
-    
-    # Setup path to your custom block
-    sys.path.append("/u/qgg5se/simple/SIMPLE_MOE/model")
-    from simple_olmoe_dynamic_k_v2 import SimpleOlmoeSparseMoeBlock
-    
-    # Verify signatures match roughly (optional safety check)
-    print(f"Replacing {olmoe_module.OlmoeSparseMoeBlock} with {SimpleOlmoeSparseMoeBlock}")
-    
-    # THE PATCH
-    olmoe_module.OlmoeSparseMoeBlock = SimpleOlmoeSparseMoeBlock
-    
-    print("✅ Patch applied successfully.")
-    
-except ImportError as e:
-    print(f"❌ Failed to apply MoE patch: {e}")
-    print("   Evaluating with original model (No Patch applied).")
+from eval.probmoe import patch_probmoe_block, verify_probmoe_block
+
+
+EXPECTED_PROBMOE_CLASS = patch_probmoe_block("olmoe", "band")
 
 # ==========================================
 # 2. WRAPPER CLASS
@@ -60,16 +41,7 @@ class HFWrapper:
             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             device_map=device_map,
         )
-        
-        for name, module in self.model.named_modules():
-            if "OlmoeSparseMoeBlock" in str(type(module)) or "SimpleOlmoeSparseMoeBlock" in str(type(module)):
-                print(f"Found MoE block: {name} - Type: {type(module)}")
-                # Check if it has simple_routing method
-                if hasattr(module, 'simple_routing'):
-                    print("OK: SIMPLE model has simple_routing method")
-                else:
-                    print("ERROR: SIMPLE model missing simple_routing method!")
-                break        
+        verify_probmoe_block(self.model, EXPECTED_PROBMOE_CLASS)
         self.model.eval()
 
     @torch.inference_mode()

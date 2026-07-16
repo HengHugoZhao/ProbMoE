@@ -1,6 +1,6 @@
 # ProbMoE Finetuning for OLMoE
 
-This folder contains the finetuning pipeline for **ProbMoE** (Sparse-Interpolated Mixture of Experts) on top of the **OLMoE** base model. It is built on top of [open-instruct](open_instruct/) and supports multiple downstream tasks (GSM, Law, Summary, Translation, CodeAlpaca) with both fixed-`k` (*exact*) and dynamic-`k` (*band-k*) expert routing.
+This folder contains the **ProbMoE** finetuning pipeline for the **OLMoE** base model. It is built on [open-instruct](open_instruct/) and provides fixed-`k` (*exact*) runs for GSM, Law, Summary, Translation, and CodeAlpaca, plus dynamic-`k` (*band-k*) runs for GSM, Law, Translation, and CodeAlpaca.
 
 ---
 
@@ -10,6 +10,7 @@ This folder contains the finetuning pipeline for **ProbMoE** (Sparse-Interpolate
 train/olmoe/
 ├── open_instruct/            # Modified open-instruct training 
 │   ├── ds_configs/  
+│   ├── OLMoE/                # Framework-local ProbMoE blocks
 │   ├── finetune/             # Finetuning entry points and 
 │   ├── run/                  # Per-task launch scripts
 │   │   ├── gsm/
@@ -20,8 +21,8 @@ train/olmoe/
 │   ├── init_env.sh           # Environment bootstrap
 │   └── requirements.txt
 └── script/
-    ├── train_ProbMoE_exact_OLMoE.sh         # Fixed-k entry point
-    └── train_ProbMoE_exact_OLMoE_dynamic.sh # Dynamic-k entry point
+    ├── train_ProbMoE_OLMoE_exact.sh   # Fixed-k entry point
+    └── train_ProbMoE_OLMoE_dynamic.sh # Dynamic-k entry point
 ```
 
 ---
@@ -54,7 +55,7 @@ bash init_env.sh
 
 ## 2. Per-Task Configuration
 
-Each supported dataset has its own folder under [open_instruct/run/](open_instruct/run/) containing two scripts:
+Each supported dataset has its own folder under [open_instruct/run/](open_instruct/run/) containing a fixed-*k* script and, where available, a dynamic-*k* script:
 
 | Script | Routing Mode | Purpose |
 |---|---|---|
@@ -74,7 +75,6 @@ Before launching a job, edit the dataset script (e.g. [open_instruct/run/gsm/tra
 | `--num_train_epochs` | Training epochs |
 | `--gradient_checkpointing` | Trade compute for memory |
 | `--probmoe` | Enable ProbMoE routing (set `True`) |
-| `--custom_moe_path` | **Absolute** path to `ProbMoE/models` (e.g. `/u/qgg5se/ProbMoE/models`) — ⚠️ **must be set to your local path before training** |
 | `--v2` | Use the faster ProbMoE kernel (set `True` for the optimized path) |
 | `--band_k` | `True` for dynamic-k, `False` for fixed-k |
 | `--max_k` / `--min_k` | Upper / lower bound on active experts |
@@ -82,13 +82,7 @@ Before launching a job, edit the dataset script (e.g. [open_instruct/run/gsm/tra
 | `--seed` | Random seed |
 | `--output_suffix` | Tag appended to the run name and checkpoint dir |
 
-> ⚠️ **`--custom_moe_path` must be set before training.** Each per-task script under [open_instruct/run/](open_instruct/run/) ships with a placeholder absolute path:
->
-> ```bash
-> --custom_moe_path "/u/qgg5se/ProbMoE/models" \   # path to the directory containing the custom MoE implementation
-> ```
->
-> Update it to the **absolute** path of `ProbMoE/models` on your machine. If it is missing or wrong, the ProbMoE block is **not** patched into the model and training silently falls back to the stock `OlmoeSparseMoeBlock`. Confirm patching via the [log line below](#verifying-the-probmoe-patch).
+The ProbMoE blocks live in [open_instruct/OLMoE/](open_instruct/OLMoE/) and are imported automatically when `--probmoe True`; no source-path argument is required. Import or patch failures stop the run instead of silently falling back to the stock block.
 
 > **Note:** to switch to the faster ProbMoE implementation, set `--v2 True` in the per-task script. To reproduce the exact number in the paper, use V1.
 
@@ -102,24 +96,18 @@ The top-level launchers under [script/](script/) wrap the per-task scripts and r
 
 ```bash
 cd train/olmoe/script
-
-# Edit DATASET (gsm | law | summary | translation | codealpaca)
-# Set WANDB_API_KEY
-# Update the cd path to your local ProbMoE/train/olmoe/open_instruct
-bash train_ProbMoE_OLMoE_exact.sh
+export WANDB_API_KEY=...  # optional when W&B is disabled
+bash train_ProbMoE_OLMoE_exact.sh gsm
 ```
 
 ### Dynamic-k
 
 ```bash
 cd train/olmoe/script
-# Edit DATASET (gsm | law | summary | translation | codealpaca)
-# Set WANDB_API_KEY
-# Update the cd path to your local ProbMoE/train/olmoe/open_instruct
-bash train_ProbMoE_OLMoE_dynamic.sh
+bash train_ProbMoE_OLMoE_dynamic.sh gsm
 ```
 
-Both scripts read a single `DATASET` variable at the top, e.g.:
+Pass the dataset as the first argument, or set `DATASET` in the environment. The exact launcher supports `gsm`, `law`, `summary`, `translation`, and `codealpaca`; the dynamic launcher supports all of those except `summary`.
 Logs are written to `log/exact/<dataset>/` and `log/dynamic/<dataset>/` respectively.
 
 ### Verifying the ProbMoE patch
@@ -127,10 +115,10 @@ Logs are written to `log/exact/<dataset>/` and `log/dynamic/<dataset>/` respecti
 If ProbMoE was patched into the model successfully, you should see a log line of the form:
 
 ```
-[RANK 0] Found MoE block: model.layers.0.mlp - Type: <class 'OLMoE.v1.ProbMoE_V1_olmoe_dynamic.ProbMoEOlmoeSparseMoeBlock'>
+[RANK 0] Found ProbMoE block: model.layers.0.mlp - Type: <class 'OLMoE.v1.ProbMoE_V1_olmoe_dynamic.ProbMoEOlmoeSparseMoeBlock'>
 ```
 
-If you don't see this, the ProbMoE module was not applied — check that `--probmoE True` is set and that `--custom_moe_path` resolves to a valid `ProbMoE/models` directory.
+If you don't see this, check that `--probmoe True` is set. A missing or mismatched ProbMoE block now raises an error during model loading.
 
 ---
 
@@ -155,7 +143,6 @@ Evaluation lives in a separate folder. See [eval/README.md](../../eval/README.md
 ## Troubleshooting
 
 - **`flash-attn` build fails:** ensure `cuda-nvcc=12.1` is on the path and `packaging` is installed before `flash-attn`.
-- **`custom_moe_path` errors:** the path must be **absolute** and point to the top-level `ProbMoE/models` directory.
 - **OOM:** reduce `--per_device_train_batch_size`, enable `--gradient_checkpointing True`, or lower `--max_k`.
 - **W&B not logging:** confirm `WANDB_API_KEY` is exported in the launcher script before `bash run/...`.
 

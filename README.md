@@ -8,7 +8,7 @@ This is the official repository for the paper: ProbMoE: Differentiable Probabili
 
 ## 📄 Overview
 
-Mixture-of-Experts (MoE) models scale by activating only a small subset of experts per token. However, training such models remains challenging because top-krouting is discrete and non-differentiable, requiring gradient estimators for expert selection whose design remains a central open problem. We introduce ProbMoE, a probabilistic routing framework that models expert selection as a distribution over cardinality-constrained expert subsets and formulates routing as probabilistic inference in this discrete subset space. To optimize this formulation, ProbMoE adopts [SIMPLE](https://openreview.net/forum?id=q3KCXh0Mug) (Ahmed et al., 2023), a gradient estimator for cardinality-constrained subset distributions.
+Mixture-of-Experts (MoE) models scale by activating only a small subset of experts per token. However, training such models remains challenging because top-*k* routing is discrete and non-differentiable, requiring gradient estimators for expert selection whose design remains a central open problem. We introduce ProbMoE, a probabilistic routing framework that models expert selection as a distribution over cardinality-constrained expert subsets and formulates routing as probabilistic inference in this discrete subset space. To optimize this formulation, ProbMoE adopts [SIMPLE](https://openreview.net/forum?id=q3KCXh0Mug) (Ahmed et al., 2023), a gradient estimator for cardinality-constrained subset distributions.
 
 - **ProbMoE Exact-*k*** — samples discrete *k*-expert subsets in the forward pass, with the backward pass propagating gradients through each expert's exact marginal probability as a tractable surrogate for the true gradient.
 - **ProbMoE Dynamic-*k*** — generalizes Exact-*k* so that both training and inference constrain routing cardinality to the same predefined range, allowing adaptive expert allocation per token.
@@ -25,12 +25,9 @@ Across benchmarks on **OLMoE** and **Qwen-MoE** backbones, ProbMoE Exact-*k* imp
 
 ```
 ProbMoE/
-├── models/        # ProbMoE routing modules patched into MoE backbones
-│   ├── OLMoE/     # Exact-k and Dynamic-k blocks for OLMoE-1B-7B
-│   └── Qwen/      # Exact-k and Dynamic-k blocks for Qwen1.5-MoE-A2.7B
 ├── train/         # Finetuning pipelines
-│   ├── olmoe/     # open-instruct based pipeline (OLMoE)
-│   └── qwen/      # LLaMA-Factory based pipeline (Qwen1.5-MoE)
+│   ├── olmoe/     # open-instruct pipeline with framework-local OLMoE blocks
+│   └── qwen/      # LLaMA-Factory pipeline with framework-local Qwen blocks
 └── eval/          # Task-specific evaluation
     ├── gsm/       # GSM8K math reasoning
     ├── mbpp/      # MBPP code benchmark
@@ -43,7 +40,7 @@ ProbMoE/
 
 ### 1️⃣ OLMoE-1B-7B
 
-The OLMoE pipeline is built on top of [open-instruct](train/olmoe/open_instruct/) and supports GSM, Law, Summary, Translation, and CodeAlpaca with both fixed-*k* and dynamic-*k* routing.
+The OLMoE pipeline is built on top of [open-instruct](train/olmoe/open_instruct/) and supports GSM, Law, Summary, Translation, and CodeAlpaca. Fixed-*k* launchers cover every task; dynamic-*k* launchers are provided for GSM, Law, Translation, and CodeAlpaca.
 
 ```bash
 conda create -n openinstruct python=3.12 -y
@@ -52,16 +49,16 @@ cd train/olmoe/open_instruct
 bash init_env.sh
 
 cd ../script
-# Set DATASET, WANDB_API_KEY, and the open_instruct path inside the script
-bash train_ProbMoE_OLMoE_exact.sh      # fixed-k
-bash train_ProbMoE_OLMoE_dynamic.sh    # dynamic-k
+export WANDB_API_KEY=...               # optional when W&B is disabled
+bash train_ProbMoE_OLMoE_exact.sh gsm  # fixed-k
+bash train_ProbMoE_OLMoE_dynamic.sh gsm # dynamic-k
 ```
 
 Full instructions: [train/olmoe/README.md](train/olmoe/README.md).
 
 ### 2️⃣ Qwen1.5-MoE-A2.7B
 
-The Qwen pipeline is built on top of [LLaMA-Factory](train/qwen/LLaMA-Factory/) with the same task coverage.
+The Qwen pipeline is built on top of [LLaMA-Factory](train/qwen/LLaMA-Factory/) with the same fixed-*k* task coverage and dynamic-*k* launchers for GSM, Law, and Translation.
 
 ```bash
 conda create -n lmfact_env python=3.12 -y
@@ -71,9 +68,9 @@ pip install -e ".[torch,metrics]"
 pip install transformers==4.51.3 deepspeed==0.16.7 wandb
 
 cd ../scripts
-# Set DATASET and WANDB_API_KEY inside the script
-bash train_ProbMoE_qwen_exact.sh       # fixed-k
-bash train_ProbMoE_qwen_dynamic.sh     # dynamic-k
+export WANDB_API_KEY=...               # optional when W&B is disabled
+bash train_ProbMoE_qwen_exact.sh gsm   # fixed-k
+bash train_ProbMoE_qwen_dynamic.sh gsm # dynamic-k
 ```
 
 Full instructions: [train/qwen/README.md](train/qwen/README.md).
@@ -96,9 +93,11 @@ If you would rather not finetune locally, we release ProbMoE-finetuned checkpoin
 | OLMoE-1B-7B | CodeAlpaca | 42 | [Hayougewr/olmoe-ProbMoE-codealpaca-ft-seed42](https://huggingface.co/Hayougewr/olmoe-ProbMoE-codealpaca-ft-seed42) |
 
 ```python
+from eval.probmoe import patch_probmoe_block
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 repo = "Hayougewr/qwen1.5-moe-a2.7b-ProbMoE-gsm-ft-seed42"
+patch_probmoe_block("qwen", "exact")
 tok = AutoTokenizer.from_pretrained(repo)
 model = AutoModelForCausalLM.from_pretrained(repo, trust_remote_code=True)
 ```
@@ -112,10 +111,10 @@ model = AutoModelForCausalLM.from_pretrained(repo, trust_remote_code=True)
 | **Exact-*k*** | `band_k = false` | Samples a *k*-subset of experts per token; gradients flow through each expert's exact marginal probability. |
 | **Dynamic-*k*** | `band_k = true` with `min_k`, `max_k` | Samples cardinality from `[min_k, max_k]` per token at both training and inference time. |
 
-To enable ProbMoE, set `probmoe = true` (or `--probmoe True`) and point `custom_moe_path` at the **absolute** path of [models/](models/), e.g. `/u/qgg5se/simple/ProbMoE/models`. A successful patch logs a line of the form:
+To enable ProbMoE, set `probmoe: true` in a Qwen YAML config or pass `--probmoe True` to the OLMoE launcher. The blocks are imported directly from their framework-local packages; no external source path is required. A successful patch logs a line of the form:
 
 ```
-Found MoE block: model.layers.0.mlp - Type: <class 'OLMoE.v1.ProbMoE_V1_olmoe_dynamic.ProbMoEOlmoeSparseMoeBlock'>
+Found ProbMoE block: model.layers.0.mlp - Type: <class 'OLMoE.v1.ProbMoE_V1_olmoe_dynamic.ProbMoEOlmoeSparseMoeBlock'>
 ```
 
 ---

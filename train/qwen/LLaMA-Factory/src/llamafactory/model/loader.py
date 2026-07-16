@@ -16,7 +16,6 @@ import os
 from typing import TYPE_CHECKING, Any, Optional, TypedDict
 
 import torch
-import sys
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -194,23 +193,24 @@ def load_model(
     patch_config(config, tokenizer, model_args, init_kwargs, is_trainable)
     apply_liger_kernel(config, model_args, is_trainable, require_logits=(finetuning_args.stage not in ["pt", "sft"]))
     
-    sys.path.append(model_args.custom_moe_path)
     if model_args.probmoe:
-        logger.info_rank0("Using ProbMoE MoE model modification for Qwen2-MoE")
-        try:    
-            import transformers.models.qwen2_moe.modeling_qwen2_moe as Qwen2_module
-            if model_args.band_k:
-                logger.info_rank0("load dynamic probmoe")
-                from Qwen.ProbMoE_V1_qwen_dynamic import ProbMoEQwen2MoeSparseMoeBlock
-            else:
-                logger.info_rank0("loading exact ProbMoE")
-                from Qwen.ProbMoE_V1_qwen_exact import ProbMoEQwen2MoeSparseMoeBlock
-            Qwen2_module.Qwen2MoeSparseMoeBlock = ProbMoEQwen2MoeSparseMoeBlock
-            logger.info_rank0("Successfully imported ProbMoEQwen2MoeSparseMoeBlock")
-        except ImportError as e:
-            logger.info_rank0(f"Failed to import ProbMoEQwen2MoeSparseMoeBlock: {e}")
-        except Exception as e:
-            logger.info_rank0(f"Error importing ProbMoEQwen2MoeSparseMoeBlock: {e}")
+        logger.info_rank0("Using the ProbMoE block for Qwen2-MoE.")
+        import transformers.models.qwen2_moe.modeling_qwen2_moe as qwen2_moe_module
+
+        if model_args.band_k:
+            logger.info_rank0("Loading the dynamic-k ProbMoE block.")
+            from .Qwen.ProbMoE_V1_qwen_dynamic import ProbMoEQwen2MoeSparseMoeBlock
+
+            config.k_min = model_args.min_k
+            config.k_max = model_args.max_k
+        else:
+            logger.info_rank0("Loading the exact-k ProbMoE block.")
+            from .Qwen.ProbMoE_V1_qwen_exact import ProbMoEQwen2MoeSparseMoeBlock
+
+        qwen2_moe_module.Qwen2MoeSparseMoeBlock = ProbMoEQwen2MoeSparseMoeBlock
+        logger.info_rank0(
+            f"Patched Qwen2MoeSparseMoeBlock with {ProbMoEQwen2MoeSparseMoeBlock.__module__}."
+        )
     else:
         logger.info_rank0("Using standard MoE model for Qwen2-MoE")
 
@@ -306,17 +306,25 @@ def load_model(
         for name, param in model.named_parameters():
             print(f"name: {name}, dtype: {param.dtype}, device: {param.device}, trainable: {param.requires_grad}")
     if model_args.probmoe:
-        for name, module in model.named_modules():
-            if isinstance(module, Qwen2_module.Qwen2MoeSparseMoeBlock) or isinstance(module, Qwen2_module.ProbMoEQwen2MoeSparseMoeBlock):
-                logger.info_rank0(f"Found Qwen2MoeSparseMoeBlock module: {name} ({type(module)})")
-                if hasattr(module, 'compute_marginals'):
-                    logger.info_rank0(f"Module {name} has method compute_marginals, using ProbMoE forward")
-                    break
-                elif hasattr(module, 'compute_marginals_band'):
-                    logger.info_rank0(f"Module {name} has method compute_marginals_band, using ProbMoE forward with band_k={model_args.band_k}")
-                    break
+        probmoe_blocks = [
+            (name, module)
+            for name, module in model.named_modules()
+            if isinstance(module, ProbMoEQwen2MoeSparseMoeBlock)
+        ]
+        if not probmoe_blocks:
+            raise RuntimeError(
+                "ProbMoE was enabled, but no ProbMoEQwen2MoeSparseMoeBlock was found in the loaded model."
+            )
+
+        name, module = probmoe_blocks[0]
+        if not hasattr(module, "probmoe_routing"):
+            raise RuntimeError(f"ProbMoE block {name} is missing probmoe_routing().")
+
+        logger.info_rank0(f"Found ProbMoE block: {name} ({type(module)})")
+        if model_args.band_k:
+            logger.info_rank0(f"ProbMoE dynamic-k range: [{module.k_min}, {module.k_max}]")
     else:
-        logger.info_rank0("Not checking for custom forward method since densemixer_moe is not enabled.") 
+        logger.info_rank0("Using the standard Qwen2-MoE block.")
             
         
     return model

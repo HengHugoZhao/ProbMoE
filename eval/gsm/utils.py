@@ -9,23 +9,12 @@ from transformers import (
     NoBadWordsLogitsProcessor,
     SuppressTokensAtBeginLogitsProcessor
 )
-import sys
-import transformers.models.olmoe.modeling_olmoe as olmoe_module
-import transformers.models.qwen2_moe.modeling_qwen2_moe as Qwen2_module
+
+from eval.probmoe import patch_probmoe_block, verify_probmoe_block
 
 def ensure_dir(d):
     if not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
-
-def set_model_eval_routing_method(model, method):
-    try:
-        for m in model.modules():
-                if hasattr(m, "set_eval_routing_method"):
-                    # logger.info(f"Setting eval routing method to {method}")
-                    m.set_eval_routing_method(method)
-    except Exception as e:
-        logger.warning(f"Failed to set eval routing method: {e}")
-
 
 class KeyWordsCriteria(StoppingCriteria):
     def __init__(self, stop_id_sequences):
@@ -154,27 +143,11 @@ def load_lm_and_tokenizer(
     use_fast_tokenizer=True,
     padding_side="left",
     mode="exact",
-    custom_moe_path="",
     model_type="olmoe",
 ):
-    if custom_moe_path is not None and custom_moe_path != "":
-        sys.path.append(custom_moe_path)
-    
-    if model_type == "olmoe":
-        if mode == "band":
-            print("Using dynamic mode olmoe block")
-            from OLMoE.v1.SIMoE_V1_olmoe_dynamic import SIMoEOlmoeSparseMoeBlock
-            olmoe_module.OlmoeSparseMoeBlock = SIMoEOlmoeSparseMoeBlock
-        else:
-            print("Using exact mode olmoe block")
-    elif model_type == "qwen":
-        if mode == "band":
-            print("Using dynamic mode qwen2 moe block")
-            from Qwen.SIMoE_V1_qwen_dynamic import SIMoEQwen2MoeSparseMoeBlock
-            Qwen2_module.Qwen2MoeSparseMoeBlock = SIMoEQwen2MoeSparseMoeBlock
-        else:
-            print("Using exact mode qwen2 moe block")
-        
+    expected_class = patch_probmoe_block(model_type, mode)
+    print(f"Using the {mode} ProbMoE block for {model_type}.")
+
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model_kwargs = {
@@ -188,6 +161,7 @@ def load_lm_and_tokenizer(
     if convert_to_half:
         model = model.half()
     model.eval()
+    verify_probmoe_block(model, expected_class)
 
     if not tokenizer_name_or_path:
         tokenizer_name_or_path = model_name_or_path
@@ -195,13 +169,6 @@ def load_lm_and_tokenizer(
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, use_fast=use_fast_tokenizer)
     tokenizer = add_pad_token(tokenizer, padding_side)
 
-    if eval_routing_method == "simple_eval":
-        set_model_eval_routing_method(model, "simple_eval")
-        print("Set model eval routing method to simple_eval")
-    else:
-        set_model_eval_routing_method(model, "deterministic")
-        print("Set model eval routing method to deterministic")
-    
     return model, tokenizer
 
 

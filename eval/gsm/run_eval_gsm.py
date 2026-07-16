@@ -5,9 +5,8 @@ import json
 import random
 import torch
 import evaluate
-import sys
-sys.path.append("/scratch/qgg5se/SIMPLE_MOE/eval")
-from utils import (
+
+from .utils import (
     generate_completions,
     load_lm_and_tokenizer,
     load_dexperts_model_and_tokenizer,
@@ -89,7 +88,6 @@ def main(args):
             device_map="balanced_low_0" if torch.cuda.device_count() > 1 else "auto",
             use_fast_tokenizer=not args.use_slow_tokenizer,
             mode=args.mode,
-            custom_moe_path=args.custom_moe_path,
             model_type=args.model_type
         )
     elif args.base_model_name_or_path:
@@ -101,19 +99,6 @@ def main(args):
             use_fast_tokenizer=not args.use_slow_tokenizer,
         )
     
-    for name, module in model.named_modules():
-        if "OlmoeSparseMoeBlock" in str(type(module)) or "SimpleOlmoeSparseMoeBlock" in str(type(module)):
-            print(f"Found MoE block: {name} - Type: {type(module)}")
-            # Check if it has simple_routing method
-            if hasattr(module, 'simple_routing'):
-                print("OK: SIMPLE model has simple_routing method")
-            else:
-                print("ERROR: SIMPLE model missing simple_routing method!")
-            break
-            
-    
-    
-
     outputs = generate_completions(
         model=model,
         tokenizer=tokenizer,
@@ -174,6 +159,5 @@ if __name__ == "__main__":
     parser.add_argument("--chat_formatting_function", type=str, default="eval.templates.create_prompt_with_tulu_chat_format")
     parser.add_argument("--mode", type=str, default="exact", choices=["exact", "band"], help="Which MoE block variant to use for evaluation.")
     parser.add_argument("--model_type", type=str, default="olmoe", choices=["olmoe", "qwen"], help="Which type of MoE model to evaluate.")
-    parser.add_argument("--custom_moe_path", type=str, default=None, help="Path to custom MoE block implementation for evaluation.")
     args = parser.parse_args()
     main(args)

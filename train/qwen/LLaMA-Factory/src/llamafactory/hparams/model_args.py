@@ -185,15 +185,19 @@ class BaseModelArguments:
     )
     probmoe: bool = field(
         default=False,
-        metadata={"help": "Whether use probmoe moe or not."},
+        metadata={"help": "Whether to use the ProbMoE routing block."},
     )
-    band_k: Optional[int] = field(
+    band_k: bool = field(
         default=False,
-        metadata={"help": "The dynamic k for router in simple moe dynamic model."},
+        metadata={"help": "Whether to use dynamic-k ProbMoE routing."},
     )
-    custom_moe_path: str = field(
-        default="",
-        metadata={"help": "The path for custom MoE implementation."},
+    min_k: int = field(
+        default=2,
+        metadata={"help": "The minimum number of active experts for dynamic-k ProbMoE routing."},
+    )
+    max_k: int = field(
+        default=4,
+        metadata={"help": "The maximum number of active experts for dynamic-k ProbMoE routing."},
     )
 
 

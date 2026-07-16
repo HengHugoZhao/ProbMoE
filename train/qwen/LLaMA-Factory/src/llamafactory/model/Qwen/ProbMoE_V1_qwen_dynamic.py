@@ -1,12 +1,9 @@
 import torch
 import torch.nn.functional as F
 from typing import Tuple
+import torch.nn as nn
 
-import itertools
-import math
-
-from transformers.models.olmoe.modeling_olmoe import OlmoeSparseMoeBlock as OriginalOlmoeSparseMoeBlock
-import random
+from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock as OriginalQwen2MoeSparseMoeBlock
 
 #helper function t
 
@@ -30,14 +27,21 @@ def torch_logaddexp_tfstyle(x1, x2):
     delta = torch.where(x1 == x2, 0., x1 - x2)
     return torch.maximum(x1, x2) + torch.nn.functional.softplus(-torch.abs(delta))
 
-class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
+
+
+class ProbMoEQwen2MoeSparseMoeBlock(OriginalQwen2MoeSparseMoeBlock):
     def __init__(self, config):
-        super().__init__(config) # initialize the original OlmoeSparseMoeBlock
+        super().__init__(config)
         self.use_gradient_clipping = getattr(config, 'use_gradient_clipping', False)
         
-        self.k_max = getattr(config, 'k_max', 8)
-        self.k_min = getattr(config, 'k_min', 6)
-
+        self.k_max = getattr(config, 'k_max', self.top_k)
+        self.k_min = getattr(config, 'k_min', 2)
+        if not 1 <= self.k_min <= self.k_max <= self.num_experts:
+            raise ValueError(
+                f"Expected 1 <= k_min <= k_max <= {self.num_experts}, "
+                f"but received k_min={self.k_min}, k_max={self.k_max}."
+            )
+    
     def log_pr_upto_k(self, log_p, log_q, k_max):
         """
         compute the log probability of less or equal to k experts being selected using dp
@@ -67,8 +71,8 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
             state = new_state
             all_states.append(state.clone())
         return torch.stack(all_states, dim=1)  # (batch_size, n_experts + 1, k + 2)
-    
-    def sample_band_K(self, router_logits, a, k_min, k_max):
+
+    def sample_band_k(self, router_logits, a, k_min, k_max):
         #compute the probability of selecting between k_min and k_max experts
         B = a.size(0)
         
@@ -77,24 +81,23 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
         idx = torch.multinomial(probs, num_samples=1).squeeze(1) # [0, band_len-1]
         ks = idx + k_min  # sampled k values
         return ks
-
+    
     def compute_marginals_band(self, router_logits, k_min, k_max):
         # print("Computing marginals with k =", k)
         # Clamp router logits to prevent extreme values
         router_logits = router_logits.float()
-        
         # router_logits_f32 = torch.clamp(router_logits_f32, min=-50.0, max=500.0)# do
+        
         log_p = log_sigmoid(router_logits)
-        log_p = log_p.requires_grad_(True)
+        log_p.requires_grad_(True)
         # log_q = torch_log1mexp_tfstyle(log_p)
         log_q = log1mexp(log_p.detach())  # stop gradient through log_q
         # log_p = log_p.detach().requires_grad_(True)
         a = self.log_pr_upto_k(log_p, log_q, k_max)
         band_logps = a[:, -1, (k_min + 1):(k_max + 2)]  # (batch_size, k_max - k_min + 1)
-        Log_P_band = torch.logsumexp(band_logps, dim=-1).sum()  # (batch_size, )
-
+        log_p_band = torch.logsumexp(band_logps, dim=-1).sum()  # (batch_size, )
         marginals = torch.autograd.grad(
-            outputs=Log_P_band,
+            outputs=log_p_band,
             # outputs=log_pr,
             inputs=log_p,
             # grad_outputs=torch.ones_like(log_pr),
@@ -129,18 +132,17 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
            
         samples = torch.stack(samples[::-1], dim=1)  # (batch_size, n_experts)
         return samples
-    
-    def simoe_routing(self, router_logits):
+   
+    def probmoe_routing(self, router_logits):
         """
-        ProbMoE-based stochastic routing for trainig
+        ProbMoE stochastic routing for training.
         """
-        # print("Using ProbMoE routing")
         router_logits = router_logits.float()
         log_p = log_sigmoid(router_logits)
         log_q = log1mexp(log_p.detach())  # stop gradient through log_q
         a = self.log_pr_upto_k(log_p, log_q, self.k_max)
         
-        ks = self.sample_band_K(router_logits, a, self.k_min, self.k_max)
+        ks = self.sample_band_k(router_logits, a, self.k_min, self.k_max)
         # print("Sampled ks:", ks)
         samples = self.sample_k_subset_dynamic(a, log_p, ks).detach()
         #compute the exact marginals and discrete samples
@@ -148,36 +150,30 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
         
         #during training, use the softmax for the router weights
         softmax_probs = F.softmax(router_logits, dim=1, dtype=torch.float)  # (batch_size*sequence_length, num_experts)
-
+        
         if self.use_gradient_clipping:
-            # Gradient clipping on the softmax probabilities
-            log_sigmoids = torch.sigmoid(router_logits)
-            regularized_marginals = 0.99 * marginals + 0.01 * log_sigmoids
+            sigmoid_probs = torch.sigmoid(router_logits)
+            regularized_marginals = 0.99 * marginals + 0.01 * sigmoid_probs
             regularized_marginals = torch.clamp(regularized_marginals, min=1e-3, max=1-1e-3)
             marginals = regularized_marginals
-        #Straight-through estimator: forward pass uses discrete samples, backward pass uses marginals
-
-        g_full = (samples - marginals).detach() + marginals
+            
+        g_full = (samples - marginals).detach() + marginals  # Straight-through estimator
+        w_full = g_full * softmax_probs  # (batch_size, n_experts)
+        values, selected_experts = torch.topk(samples, self.k_max, dim=-1)
         
-        w_full = g_full * softmax_probs
-        
-        values, selected_experts = torch.topk(samples, k=self.k_max, dim=1)  # (batch_size, k_max)
-        
-        # router_weights = (soft_routing_weights - marg).detach() + marg
         router_weights = torch.gather(w_full, 1, selected_experts)
         
-        router_weights = router_weights * values  # zero out the unselected experts beyond k*
+        router_weights = router_weights * values  # zero out unselected experts
         
+    
         #cast back to the input dtype
         router_weights = router_weights.to(router_logits.dtype)
         return router_weights, selected_experts
-    
-    
+   
     def deterministic_routing(self, router_logits):
         """
         Deterministic top-k routing for inference
         """
-        # print("determinstic routing")
         #deterministic top-k routing
         router_logits = router_logits.float() #[B,E]
         B, E = router_logits.shape
@@ -224,49 +220,50 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
         # print("Deterministic ks:", selected_experts)
         return routing_weights, selected_experts
 
-    def forward(self, hidden_states: torch.Tensor):
-        """
-        SIMoE-based forward function for OLMoE sparse block
-        """
 
-        dtype = hidden_states.dtype
-        device = hidden_states.device
-
-
-        batch_size, sequence_length, hidden_dim = hidden_states.size()
-        hidden_states = hidden_states.view(-1, hidden_dim)  # (batch_size*sequence_length, hidden_dim)
-
-        #router logits (batch_size*squence_length, num_experts)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """ """
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
-
+        
         if self.training:
-            # Use SIMoE
-            routing_weights, selected_experts = self.simoe_routing(router_logits)
-
+            # stochastic
+            routing_weights, selected_experts = self.probmoe_routing(router_logits)
         else:
-            # Use deterministic top-k routing
-            # print("Using deterministic routing for inference")
+            # determinstic     
             routing_weights, selected_experts = self.deterministic_routing(router_logits)
 
-        #Initialize output
+        routing_weights = routing_weights.to(hidden_states.dtype)
         final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim), dtype=dtype, device=device
+            (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
         )
 
-        #crate expert mask for routing
-        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0) 
+        # One hot encode the selected experts to create an expert mask
+        # this will be used to easily index which expert is going to be sollicitated
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
 
-        #process through each expert
-        for expert_idx in range(self.num_experts):
+        # Loop over all available experts in the model and perform the computation on each expert
+        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
             expert_layer = self.experts[expert_idx]
-            idx, top_x = torch.where(expert_mask[expert_idx])
+            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
 
             # Index the correct hidden states and compute the expert hidden state for
             # the current expert. We need to make sure to multiply the output hidden
-            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)   
+            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
             current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
-            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(dtype))
+
+            # However `index_add_` only support torch tensors for indexing so we'll use
+            # the `top_x` tensor here.
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+
+        shared_expert_output = self.shared_expert(hidden_states)
+        shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+
+        final_hidden_states = final_hidden_states + shared_expert_output
 
         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-        return final_hidden_states, router_logits         
+        return final_hidden_states, router_logits

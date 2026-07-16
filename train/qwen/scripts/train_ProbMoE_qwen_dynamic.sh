@@ -1,7 +1,15 @@
-DATASET="gsm" #change this if you want to use other dataset
+#!/usr/bin/env bash
+set -euo pipefail
 
-export WANDB_API_KEY=""
+DATASET="${1:-${DATASET:-gsm}}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+LLAMA_FACTORY_DIR="${SCRIPT_DIR}/../LLaMA-Factory"
+LAUNCHER="run/qwen1.5/probmoe_full/train_${DATASET}_dynamic.sh"
 
-cd #to the directory of LLaMA-Factory
+if [[ ! -f "${LLAMA_FACTORY_DIR}/${LAUNCHER}" ]]; then
+    echo "Unsupported dataset or missing dynamic-k launcher: ${LLAMA_FACTORY_DIR}/${LAUNCHER}" >&2
+    exit 1
+fi
 
-bash run/qwen1.5/probmoe_full/train_${DATASET}_dynamic.sh
+cd "${LLAMA_FACTORY_DIR}"
+bash "${LAUNCHER}"

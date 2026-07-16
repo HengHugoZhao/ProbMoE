@@ -3,7 +3,8 @@ model_name_or_path: Qwen/Qwen1.5-MoE-A2.7B
 trust_remote_code: true
 probmoe: true
 band_k: true
-custom_moe_path:             #path to the directory containing the custom MoE implementation 
+min_k: 2
+max_k: 4
 
 ### method
 stage: sft

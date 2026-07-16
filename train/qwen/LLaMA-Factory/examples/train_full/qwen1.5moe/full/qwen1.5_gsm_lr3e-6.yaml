@@ -3,7 +3,6 @@ model_name_or_path: Qwen/Qwen1.5-MoE-A2.7B
 trust_remote_code: true
 probmoe: true
 band_k: false
-custom_moe_path:             #path to the directory containing the custom MoE implementation 
 
 ### method
 stage: sft
@@ -20,7 +19,7 @@ preprocessing_num_workers: 16
 dataloader_num_workers: 4
 
 ### output
-output_dir: saves/qwen1.5-moe-a2.7b/full/sft_bs64/qwen1.5_gsm_lr3e-6_simple
+output_dir: saves/qwen1.5-moe-a2.7b/full/sft_bs64/qwen1.5_gsm_lr3e-6
 logging_steps: 1
 save_strategy: "epoch" 
 save_total_limit: 8
@@ -28,7 +27,7 @@ plot_loss: true
 overwrite_output_dir: true
 save_only_model: true
 report_to: wandb  # choices: [none, wandb, tensorboard, swanlab, mlflow]
-run_name: "qwen1.5_gsm_lr3e-6_simple"
+run_name: "qwen1.5_gsm_lr3e-6_full"
 
 ### train
 per_device_train_batch_size: 16

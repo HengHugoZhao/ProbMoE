@@ -33,7 +33,7 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
     def __init__(self, config):
         super().__init__(config)
         self.use_gradient_clipping = getattr(config, "use_gradient_clipping", False)
-        # Default to exact ancestral sampling: SIMoE's Straight-Through
+        # Default to exact ancestral sampling: ProbMoE's straight-through
         # estimator requires E[samples] = marginals, which only holds when
         # samples are drawn from the constrained distribution P(S | exactly k).
         # `gumbel_topk_sample` samples from a Plackett-Luce surrogate instead
@@ -54,7 +54,7 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
     # Routing
     # ----------------------------------------------------------------------
 
-    def simoe_routing(self, router_logits: torch.Tensor):
+    def probmoe_routing(self, router_logits: torch.Tensor):
         """
         Stochastic constrained routing for training.
 
@@ -115,7 +115,7 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
         router_logits = self.gate(hidden_states)
 
         if self.training:
-            routing_weights, selected_experts = self.simoe_routing(router_logits)
+            routing_weights, selected_experts = self.probmoe_routing(router_logits)
         else:
             routing_weights, selected_experts = self.deterministic_routing(
                 router_logits
