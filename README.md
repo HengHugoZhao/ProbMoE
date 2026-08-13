@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/python-3.10+-blue">
 </p>
 
-This is the official repository for the paper: ProbMoE: Differentiable Probabilistic Routing for Mixture-of-Experts
+This is the official repository for the paper: ProbMoE: Differentiable Probabilistic Routing for Mixture-of-Experts. Blog page: [click](https://henghugozhao.github.io/projects/probmoe/#walkthrough)
 
 ## 📄 Overview
 
