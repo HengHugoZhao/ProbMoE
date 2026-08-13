@@ -92,16 +92,17 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
         log_p = log_sigmoid(router_logits)
         log_p = log_p.requires_grad_(True)
         # log_q = torch_log1mexp_tfstyle(log_p)
-        log_q = log1mexp(log_p.detach())  # stop gradient through log_q
+        log_q = log1mexp(log_p)
         # log_p = log_p.detach().requires_grad_(True)
-        a = self.log_pr_upto_k(log_p, log_q, k_max)
+        probe = torch.zeros_like(log_p, requires_grad=True)
+        a = self.log_pr_upto_k(log_p + probe, log_q, k_max)
         band_logps = a[:, -1, (k_min + 1):(k_max + 2)]  # (batch_size, k_max - k_min + 1)
         log_p_band = torch.logsumexp(band_logps, dim=-1).sum()  # (batch_size, )
 
         marginals = torch.autograd.grad(
             outputs=log_p_band,
             # outputs=log_pr,
-            inputs=log_p,
+            inputs=probe,
             # grad_outputs=torch.ones_like(log_pr),
             create_graph=True,
         )[0]
@@ -141,13 +142,14 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
         """
         # print("Using ProbMoE routing")
         router_logits = router_logits.float()
-        log_p = log_sigmoid(router_logits)
-        log_q = log1mexp(log_p.detach())  # stop gradient through log_q
-        a = self.log_pr_upto_k(log_p, log_q, self.k_max)
+        with torch.no_grad():
+            log_p = log_sigmoid(router_logits)
+            log_q = log1mexp(log_p)  # stop gradient through log_q
+            a = self.log_pr_upto_k(log_p, log_q, self.k_max)
         
-        ks = self.sample_band_k(router_logits, a, self.k_min, self.k_max)
-        # print("Sampled ks:", ks)
-        samples = self.sample_k_subset_dynamic(a, log_p, ks).detach()
+            ks = self.sample_band_k(router_logits, a, self.k_min, self.k_max)
+            # print("Sampled ks:", ks)
+            samples = self.sample_k_subset_dynamic(a, log_p, ks).detach()
         #compute the exact marginals and discrete samples
         marginals, _ = self.compute_marginals_band(router_logits, self.k_min, self.k_max)
         

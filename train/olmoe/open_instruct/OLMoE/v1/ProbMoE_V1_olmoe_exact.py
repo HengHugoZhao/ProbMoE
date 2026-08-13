@@ -72,16 +72,17 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
         # router_logits_f32 = torch.clamp(router_logits_f32, min=-50.0, max=500.0)# do
         log_p = log_sigmoid(router_logits_f32)
         log_p = log_p.requires_grad_(True)
-        # log_q = torch_log1mexp_tfstyle(log_p)
-        log_q = log1mexp(log_p.detach())  # stop gradient through log_q
-        # log_p = log_p.detach().requires_grad_(True)
-        a = self.log_pr_exactly_k(log_p, log_q, k)
+        # Keep log_q connected to router_logits for the outer derivative.
+        log_q = log1mexp(log_p)
+
+        probe = torch.zeros_like(log_p, requires_grad=True)
+        a = self.log_pr_exactly_k(log_p + probe, log_q, k)
         log_pr = a[:, -1, k + 1 : k+2]
 
         marginals = torch.autograd.grad(
             outputs=log_pr.sum(),
             # outputs=log_pr,
-            inputs=log_p,
+            inputs=probe,
             # grad_outputs=torch.ones_like(log_pr),
             create_graph=True,
         )[0]
@@ -136,10 +137,12 @@ class ProbMoEOlmoeSparseMoeBlock(OriginalOlmoeSparseMoeBlock):
         ProbMoE stochastic routing for training.
         """
         router_logits = router_logits.float()
-        log_p = log_sigmoid(router_logits)
-        log_q = log1mexp(log_p.detach())  # stop gradient through log_q
-        a = self.log_pr_exactly_k(log_p, log_q, self.top_k)
-        samples = self.sample_k_subset(a, log_p, self.top_k).detach()
+        with torch.no_grad():   
+            log_p = log_sigmoid(router_logits)
+            log_q = log1mexp(log_p) 
+            a = self.log_pr_exactly_k(log_p, log_q, self.top_k)
+            samples = self.sample_k_subset(a, log_p, self.top_k)
+        
         #compute the exact marginals and discrete samples
         marginals, _ = self.compute_marginals(router_logits, self.top_k)
         
